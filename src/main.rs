@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+use colored::*;
 use hex;
 use thiserror::Error;
 
@@ -8,19 +9,29 @@ use nom::combinator::{map, peek};
 use nom::multi::length_data;
 use nom::number::complete::be_u16;
 use nom::sequence::tuple;
-use nom::IResult;
+use nom::Err::{Error, Failure, Incomplete};
+use nom::{Err, IResult};
 
+use std::fmt;
 use std::fs;
+use std::fs::File;
+use std::io;
+use std::io::prelude::*;
+use std::io::BufWriter;
 
 #[derive(Parser)]
+#[command(author, version, about, long_about = None)]
 struct Cli {
     path: std::path::PathBuf,
+
+    #[arg(short, long)]
+    collect_path: Option<std::path::PathBuf>,
 }
 
 fn main() -> Result<()> {
     let args = Cli::parse();
     let mut raw = fs::read_to_string(args.path)?;
-    println!("input: {}", raw);
+    // println!("input: {}", raw);
     remove_whitespace(&mut raw);
 
     // for line in raw.lines() {
@@ -28,11 +39,67 @@ fn main() -> Result<()> {
     // println!("bytes: {:?}", bytes);
     // }
     let bytes = hex::decode(raw)?;
-    println!("bytes: {:02x?}", bytes);
-    let bs = bytes.as_slice();
+    // println!("bytes: {:02x?}", bytes);
+    let mut bs = bytes.as_slice();
 
-    let Ok((xbs, pkt)) = parse_edm(bs) else { todo!() };
-    println!("frame: {:?}", pkt.unwrap());
+    let mut bufs: Vec<&[u8]> = Vec::new();
+
+    loop {
+        let res = parse_edm(bs);
+
+        match res {
+            Ok((xbs, pkt)) => {
+                bs = xbs;
+
+                let frame = pkt.unwrap();
+                println!("{}", frame);
+
+                match frame.subframe {
+                    EDMSubframe::DataEvent(data_event) => {
+                        if args.collect_path.is_some() {
+                            bufs.push(data_event.payload);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            Err(Error(e)) => {
+                let c: IResult<&[u8], &[u8]> = take(1u32)(e.input);
+
+                match c {
+                    Ok((xbs, _)) => {
+                        bs = xbs;
+                    }
+                    _ => {
+                        break;
+                    }
+                }
+            }
+
+            Err(Failure(e)) => {
+                break;
+            }
+
+            Err(Incomplete(e)) => {
+                break;
+            }
+        };
+    }
+
+    if let Some(path) = args.collect_path {
+        let f = File::create(path)?;
+
+        let mut writer = BufWriter::new(f);
+        println!("BUFS: {:?}", bufs);
+
+        for b in bufs.iter() {
+            println!("BUF: {:?}", b);
+            writer.write(b).expect("can't write to file");
+        }
+        writer.flush();
+    }
+
     Ok(())
 }
 
@@ -146,6 +213,26 @@ pub enum EDMSubframe<'a> {
     StartEvent(EDMStartEvent),
 }
 
+impl<'a> fmt::Display for EDMSubframe<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EDMSubframe::ConnectEvent(x) => write!(f, "{} {}", "ConnectEvt".cyan(), x),
+            EDMSubframe::DisconnectEvent(x) => write!(f, "{} {}", "DisconnectEvt".cyan(), x),
+            EDMSubframe::DataEvent(x) => write!(f, "{} {}", "DataEvt".cyan(), x),
+            EDMSubframe::DataCommand(x) => write!(f, "{} {}", "DataCmd".cyan(), x),
+            EDMSubframe::AtRequest(x) => write!(f, "{} {}", "ATReq".cyan(), x),
+            EDMSubframe::AtResponse(x) => write!(f, "{} {}", "ATRes".cyan(), x),
+            EDMSubframe::AtEvent(x) => write!(f, "{} {}", "ATEvt".cyan(), x),
+            EDMSubframe::ResendConnectEventsCommand(x) => {
+                write!(f, "{} {}", "ResendCECmd".cyan(), x)
+            }
+            EDMSubframe::IphoneEvent(x) => write!(f, "{} {}", "IphoneEvt".cyan(), x),
+            EDMSubframe::StartEvent(x) => write!(f, "{} {}", "StartEvt".cyan(), x),
+            _ => write!(f, "unknown"),
+        }
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum EDMConnectTypeError {
     #[error("bad connect type")]
@@ -172,6 +259,20 @@ impl TryFrom<u8> for EDMConnectType {
     }
 }
 
+impl fmt::Display for EDMConnectType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                EDMConnectType::Bluetooth => "BLUETOOTH".blue(),
+                EDMConnectType::IPv4 => "IPv4".blue(),
+                EDMConnectType::IPv6 => "IPv6".blue(),
+            }
+        )
+    }
+}
+
 #[derive(Debug)]
 pub struct EDMConnectEvent<'a> {
     channel_id: u8,
@@ -192,6 +293,18 @@ impl<'a> EDMConnectEvent<'a> {
     }
 }
 
+impl<'a> fmt::Display for EDMConnectEvent<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "channel id: {:#02x}, connect type: {}, payload: {}",
+            self.channel_id,
+            self.connect_type,
+            hex::encode(self.payload).red()
+        )
+    }
+}
+
 #[derive(Debug)]
 pub struct EDMDisconnectEvent {
     channel_id: u8,
@@ -205,6 +318,12 @@ impl EDMDisconnectEvent {
     }
 }
 
+impl fmt::Display for EDMDisconnectEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "channel id: {:#02x}", self.channel_id)
+    }
+}
+
 #[derive(Debug)]
 pub struct EDMDataEvent<'a> {
     channel_id: u8,
@@ -215,8 +334,19 @@ impl<'a> EDMDataEvent<'a> {
     pub fn new(bytes: &'a [u8]) -> Result<Self, ()> {
         Ok(Self {
             channel_id: bytes[0],
-            payload: &bytes[2..],
+            payload: &bytes[1..],
         })
+    }
+}
+
+impl<'a> fmt::Display for EDMDataEvent<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "channel id: {:#02x}, payload: {}",
+            self.channel_id,
+            hex::encode(self.payload).green()
+        )
     }
 }
 
@@ -230,8 +360,19 @@ impl<'a> EDMDataCommand<'a> {
     pub fn new(bytes: &'a [u8]) -> Result<Self, ()> {
         Ok(Self {
             channel_id: bytes[0],
-            payload: &bytes[2..],
+            payload: &bytes[1..],
         })
+    }
+}
+
+impl<'a> fmt::Display for EDMDataCommand<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "channel id: {:#02x}, payload: {}",
+            self.channel_id,
+            hex::encode(self.payload).green()
+        )
     }
 }
 
@@ -246,6 +387,14 @@ impl<'a> EDMAtRequest<'a> {
     }
 }
 
+impl<'a> fmt::Display for EDMAtRequest<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut txt = String::from_utf8_lossy(self.payload).into_owned();
+        txt.retain(|c| c != '\n' && c != '\r');
+        write!(f, "=> {}", txt.yellow())
+    }
+}
+
 #[derive(Debug)]
 pub struct EDMAtResponse<'a> {
     payload: &'a [u8],
@@ -254,6 +403,14 @@ pub struct EDMAtResponse<'a> {
 impl<'a> EDMAtResponse<'a> {
     pub fn new(bytes: &'a [u8]) -> Result<Self, ()> {
         Ok(Self { payload: bytes })
+    }
+}
+
+impl<'a> fmt::Display for EDMAtResponse<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut txt = String::from_utf8_lossy(self.payload).into_owned();
+        txt.retain(|c| c != '\n' && c != '\r');
+        write!(f, "=> {}", txt.yellow())
     }
 }
 
@@ -268,12 +425,26 @@ impl<'a> EDMAtEvent<'a> {
     }
 }
 
+impl<'a> fmt::Display for EDMAtEvent<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut txt = String::from_utf8_lossy(self.payload).into_owned();
+        txt.retain(|c| c != '\n' && c != '\r');
+        write!(f, "=> {}", txt.yellow())
+    }
+}
+
 #[derive(Debug)]
 pub struct EDMResendConnectEventsCommand {}
 
 impl EDMResendConnectEventsCommand {
     pub fn new() -> Self {
         Self {}
+    }
+}
+
+impl fmt::Display for EDMResendConnectEventsCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[no data]")
     }
 }
 
@@ -286,12 +457,24 @@ impl EDMIphoneEvent {
     }
 }
 
+impl fmt::Display for EDMIphoneEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[no data]")
+    }
+}
+
 #[derive(Debug)]
 pub struct EDMStartEvent {}
 
 impl EDMStartEvent {
     pub fn new() -> Self {
         Self {}
+    }
+}
+
+impl fmt::Display for EDMStartEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[no data]")
     }
 }
 
@@ -349,6 +532,12 @@ impl<'a> EDMFrame<'a> {
     }
 }
 
+impl<'a> fmt::Display for EDMFrame<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.subframe)
+    }
+}
+
 // EDM is 0xAA [flags_len] [payload] 0x55
 // where flags_len is 4 reserved bits then 12 bits of payload length
 // .. first stab
@@ -372,10 +561,12 @@ fn parse_edm(input: &[u8]) -> IResult<&[u8], Result<EDMFrame, EDMFrameError>> {
     let t = tuple((
             tag([START]), 
             length_data(map(be_u16, |x| x & 0xfff)),
-            peek(tag([END]))
+            tag([END])
     ))(input)?;
 
     let (payload, (id, typ)) = map(be_u16, |x| (x >> 4, x & 7))(t.1 .1)?;
     let frame = EDMFrame::from_parts(id, typ, payload);
     Ok((t.0, frame))
 }
+
+// fn scan_edm(input: &[u8]) -> IResult<&[u8]
