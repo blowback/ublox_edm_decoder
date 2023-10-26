@@ -31,13 +31,9 @@ struct Cli {
 fn main() -> Result<()> {
     let args = Cli::parse();
     let mut raw = fs::read_to_string(args.path)?;
-    // println!("input: {}", raw);
+
     remove_whitespace(&mut raw);
 
-    // for line in raw.lines() {
-    // let bytes = hex::decode(line);
-    // println!("bytes: {:?}", bytes);
-    // }
     let bytes = hex::decode(raw)?;
     // println!("bytes: {:02x?}", bytes);
     let mut bs = bytes.as_slice();
@@ -65,16 +61,7 @@ fn main() -> Result<()> {
             }
 
             Err(Error(e)) => {
-                let c: IResult<&[u8], &[u8]> = take(1u32)(e.input);
-
-                match c {
-                    Ok((xbs, _)) => {
-                        bs = xbs;
-                    }
-                    _ => {
-                        break;
-                    }
-                }
+                bs = &bs[1..];
             }
 
             Err(Failure(e)) => {
@@ -106,25 +93,6 @@ fn main() -> Result<()> {
 fn remove_whitespace(s: &mut String) {
     s.retain(|c| !c.is_whitespace());
 }
-
-// fn scan_for_edm<'a>(input: &'a [u8]) -> IResult<&'a [u8], &'a [u8], Error<&'a [u8]>> {
-//
-//     let (candidate, _crap) = take_till(|c| c == START)(input)?;
-//     let (pkt, _header) = be_u8(candidate)?;
-//     let (pkt, flags_len) = be_u16(pkt)?;
-//     let len = flags_len & 0xfff;
-//     let (remainder, payload) = take(len)(pkt)?;
-//     let (remainder, trailer) = be_u8(remainder)?;
-//
-//     if trailer == END {
-//         Ok((remainder, payload))
-//     } else {
-//         Err(Err::Error(make_error(
-//             candidate,
-//             nom::error::ErrorKind::TagBits,
-//         )))
-//     }
-// }
 
 #[derive(Debug)]
 pub enum EDMType {
