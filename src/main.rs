@@ -3,13 +3,11 @@ use clap::Parser;
 use hex;
 use thiserror::Error;
 
-use nom::bytes::complete::{tag, take, take_till};
-use nom::combinator::{map, peek, value};
-use nom::error::{make_error, Error};
+use nom::bytes::complete::{tag, take};
+use nom::combinator::{map, peek};
 use nom::multi::length_data;
-use nom::number::complete::{be_u16, be_u8};
+use nom::number::complete::be_u16;
 use nom::sequence::tuple;
-use nom::Err;
 use nom::IResult;
 
 use std::fs;
@@ -123,24 +121,231 @@ pub enum EDMFrameError {
     BadFrameIdentifier,
     #[error("bad frame type")]
     BadFrameType,
+    #[error("bad frame data")]
+    BadFrameData,
 }
 
 #[derive(Debug)]
 pub struct EDMFrame<'a> {
     id: EDMIdentifier,
     ftype: EDMType,
+    subframe: EDMSubframe<'a>,
+}
+
+#[derive(Debug)]
+pub enum EDMSubframe<'a> {
+    ConnectEvent(EDMConnectEvent<'a>),
+    DisconnectEvent(EDMDisconnectEvent),
+    DataEvent(EDMDataEvent<'a>),
+    DataCommand(EDMDataCommand<'a>),
+    AtRequest(EDMAtRequest<'a>),
+    AtResponse(EDMAtResponse<'a>),
+    AtEvent(EDMAtEvent<'a>),
+    ResendConnectEventsCommand(EDMResendConnectEventsCommand),
+    IphoneEvent(EDMIphoneEvent),
+    StartEvent(EDMStartEvent),
+}
+
+#[derive(Error, Debug)]
+pub enum EDMConnectTypeError {
+    #[error("bad connect type")]
+    BadConnectType,
+}
+
+#[derive(Debug)]
+pub enum EDMConnectType {
+    Bluetooth = 1,
+    IPv4,
+    IPv6,
+}
+
+impl TryFrom<u8> for EDMConnectType {
+    type Error = EDMConnectTypeError;
+
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        match v {
+            x if x == EDMConnectType::Bluetooth as u8 => Ok(EDMConnectType::Bluetooth),
+            x if x == EDMConnectType::IPv4 as u8 => Ok(EDMConnectType::IPv4),
+            x if x == EDMConnectType::IPv6 as u8 => Ok(EDMConnectType::IPv6),
+            _ => Err(EDMConnectTypeError::BadConnectType),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct EDMConnectEvent<'a> {
+    channel_id: u8,
+    connect_type: EDMConnectType,
     payload: &'a [u8],
 }
 
+impl<'a> EDMConnectEvent<'a> {
+    pub fn new(bytes: &'a [u8]) -> Result<Self, EDMConnectTypeError> {
+        let channel_id = bytes[0];
+        let connect_type = EDMConnectType::try_from(bytes[1])?;
+
+        Ok(Self {
+            channel_id,
+            connect_type,
+            payload: &bytes[2..],
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct EDMDisconnectEvent {
+    channel_id: u8,
+}
+
+impl EDMDisconnectEvent {
+    pub fn new(bytes: &[u8]) -> Result<Self, ()> {
+        Ok(Self {
+            channel_id: bytes[0],
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct EDMDataEvent<'a> {
+    channel_id: u8,
+    payload: &'a [u8],
+}
+
+impl<'a> EDMDataEvent<'a> {
+    pub fn new(bytes: &'a [u8]) -> Result<Self, ()> {
+        Ok(Self {
+            channel_id: bytes[0],
+            payload: &bytes[2..],
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct EDMDataCommand<'a> {
+    channel_id: u8,
+    payload: &'a [u8],
+}
+
+impl<'a> EDMDataCommand<'a> {
+    pub fn new(bytes: &'a [u8]) -> Result<Self, ()> {
+        Ok(Self {
+            channel_id: bytes[0],
+            payload: &bytes[2..],
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct EDMAtRequest<'a> {
+    payload: &'a [u8],
+}
+
+impl<'a> EDMAtRequest<'a> {
+    pub fn new(bytes: &'a [u8]) -> Result<Self, ()> {
+        Ok(Self { payload: bytes })
+    }
+}
+
+#[derive(Debug)]
+pub struct EDMAtResponse<'a> {
+    payload: &'a [u8],
+}
+
+impl<'a> EDMAtResponse<'a> {
+    pub fn new(bytes: &'a [u8]) -> Result<Self, ()> {
+        Ok(Self { payload: bytes })
+    }
+}
+
+#[derive(Debug)]
+pub struct EDMAtEvent<'a> {
+    payload: &'a [u8],
+}
+
+impl<'a> EDMAtEvent<'a> {
+    pub fn new(bytes: &'a [u8]) -> Result<Self, ()> {
+        Ok(Self { payload: bytes })
+    }
+}
+
+#[derive(Debug)]
+pub struct EDMResendConnectEventsCommand {}
+
+impl EDMResendConnectEventsCommand {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+#[derive(Debug)]
+pub struct EDMIphoneEvent {}
+
+impl EDMIphoneEvent {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+#[derive(Debug)]
+pub struct EDMStartEvent {}
+
+impl EDMStartEvent {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
 impl<'a> EDMFrame<'a> {
-    pub fn new(id: EDMIdentifier, ftype: EDMType, payload: &'a [u8]) -> Self {
-        Self { id, ftype, payload }
+    pub fn new(id: EDMIdentifier, ftype: EDMType, subframe: EDMSubframe<'a>) -> Self {
+        Self {
+            id,
+            ftype,
+            subframe,
+        }
     }
 
     pub fn from_parts(id: u16, ftype: u16, payload: &'a [u8]) -> Result<Self, EDMFrameError> {
-        let id = EDMIdentifier::try_from(id).map_err(|_| EDMFrameError::BadFrameIdentifier)?;
-        let ftype = EDMType::try_from(ftype).map_err(|_| EDMFrameError::BadFrameType)?;
-        Ok(Self { id, ftype, payload })
+        let xid = EDMIdentifier::try_from(id).map_err(|_| EDMFrameError::BadFrameIdentifier)?;
+        let xftype = EDMType::try_from(ftype).map_err(|_| EDMFrameError::BadFrameType)?;
+
+        let subframe = match (&xid, &xftype) {
+            (EDMIdentifier::Connect, EDMType::Event) => EDMSubframe::ConnectEvent(
+                EDMConnectEvent::new(payload).map_err(|_| EDMFrameError::BadFrameData)?,
+            ),
+            (EDMIdentifier::Disconnect, EDMType::Event) => EDMSubframe::DisconnectEvent(
+                EDMDisconnectEvent::new(payload).map_err(|_| EDMFrameError::BadFrameData)?,
+            ),
+            (EDMIdentifier::Data, EDMType::Event) => EDMSubframe::DataEvent(
+                EDMDataEvent::new(payload).map_err(|_| EDMFrameError::BadFrameData)?,
+            ),
+            (EDMIdentifier::Data, EDMType::Command) => EDMSubframe::DataCommand(
+                EDMDataCommand::new(payload).map_err(|_| EDMFrameError::BadFrameData)?,
+            ),
+            (EDMIdentifier::AT, EDMType::Request) => EDMSubframe::AtRequest(
+                EDMAtRequest::new(payload).map_err(|_| EDMFrameError::BadFrameData)?,
+            ),
+            (EDMIdentifier::AT, EDMType::Response) => EDMSubframe::AtResponse(
+                EDMAtResponse::new(payload).map_err(|_| EDMFrameError::BadFrameData)?,
+            ),
+            (EDMIdentifier::AT, EDMType::Event) => EDMSubframe::AtEvent(
+                EDMAtEvent::new(payload).map_err(|_| EDMFrameError::BadFrameData)?,
+            ),
+            (EDMIdentifier::ResendConnectEvents, EDMType::Command) => {
+                EDMSubframe::ResendConnectEventsCommand(EDMResendConnectEventsCommand::new())
+            }
+            (EDMIdentifier::Iphone, EDMType::Event) => {
+                EDMSubframe::IphoneEvent(EDMIphoneEvent::new())
+            }
+            (EDMIdentifier::Start, EDMType::Event) => EDMSubframe::StartEvent(EDMStartEvent::new()),
+
+            (_, _) => panic!("arse"),
+        };
+
+        Ok(Self {
+            id: xid,
+            ftype: xftype,
+            subframe,
+        })
     }
 }
 
