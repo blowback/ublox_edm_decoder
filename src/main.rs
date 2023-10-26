@@ -63,7 +63,7 @@ fn remove_whitespace(s: &mut String) {
 
 #[derive(Debug)]
 pub enum EDMType {
-    Event,
+    Event = 0x1,
     Indication,
     Response,
     Request,
@@ -89,8 +89,13 @@ impl TryFrom<u16> for EDMType {
 
 #[derive(Debug)]
 pub enum EDMIdentifier {
-    ConnectEvent = 0x001,
-    DisconnectEvent = 0x002,
+    Connect = 0x001,
+    Disconnect,
+    Data,
+    AT,
+    ResendConnectEvents,
+    Iphone,
+    Start,
 }
 
 impl TryFrom<u16> for EDMIdentifier {
@@ -98,8 +103,15 @@ impl TryFrom<u16> for EDMIdentifier {
 
     fn try_from(v: u16) -> Result<Self, Self::Error> {
         match v {
-            x if x == EDMIdentifier::ConnectEvent as u16 => Ok(EDMIdentifier::ConnectEvent),
-            x if x == EDMIdentifier::DisconnectEvent as u16 => Ok(EDMIdentifier::DisconnectEvent),
+            x if x == EDMIdentifier::Connect as u16 => Ok(EDMIdentifier::Connect),
+            x if x == EDMIdentifier::Disconnect as u16 => Ok(EDMIdentifier::Disconnect),
+            x if x == EDMIdentifier::Data as u16 => Ok(EDMIdentifier::Data),
+            x if x == EDMIdentifier::AT as u16 => Ok(EDMIdentifier::AT),
+            x if x == EDMIdentifier::ResendConnectEvents as u16 => {
+                Ok(EDMIdentifier::ResendConnectEvents)
+            }
+            x if x == EDMIdentifier::Iphone as u16 => Ok(EDMIdentifier::Iphone),
+            x if x == EDMIdentifier::Start as u16 => Ok(EDMIdentifier::Start),
             _ => Err(()),
         }
     }
