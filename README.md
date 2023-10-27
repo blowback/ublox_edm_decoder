@@ -14,4 +14,4 @@ and dump them to a file.
 
 `cargo run -- data/bad.txt --collect-path FOO`
 
-
+![screenshot](docs/images/screener.png)
