@@ -1,5 +1,5 @@
 [package]
-name = "rd8200_ppp_decoder"
+name = "ublox_edm_decoder"
 version = "0.1.0"
 edition = "2021"
 
